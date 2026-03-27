@@ -3100,7 +3100,7 @@ function goToCheckoutOverlay(){
     }
 
     const email = val("c_email");
-    const emailOk = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email || "");
+    const emailOk = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email || "");
     if (!emailOk){
       statusEl.textContent = "Please enter a valid email address.";
       return;
@@ -3110,6 +3110,63 @@ function goToCheckoutOverlay(){
     const hoursNum = Math.max(3, Number(state.hours || 1));
     const currency = getTripCurrency();
     const taxes = getTaxBreakdown(chosen.total);
+
+    const dbBooking = {
+      mode: (state.mode === "hourly") ? "hourly" : "one_way",
+      pickup_text: state.pickup || "",
+      dropoff_text: (state.mode === "hourly") ? null : (state.dropoff || ""),
+      pickup_lat: Number(val("h_pickup_lat") || 0) || null,
+      pickup_lng: Number(val("h_pickup_lng") || 0) || null,
+      dropoff_lat: Number(val("h_dropoff_lat") || 0) || null,
+      dropoff_lng: Number(val("h_dropoff_lng") || 0) || null,
+      pickup_airport: val("h_pickup_airport") || null,
+      dropoff_airport: val("h_dropoff_airport") || null,
+      pickup_datetime: state.date && state.time ? new Date(`${state.date}T${state.time}:00`).toISOString() : null,
+      hours: (state.mode === "hourly") ? hoursNum : null,
+      distance_m: Number(val("h_distance_m") || 0) || null,
+      duration_s: Number(val("h_duration_s") || 0) || null,
+      currency: currency,
+      vehicle_key: chosen.id,
+      price_estimate: Number(chosen.total) || 0,
+      tax_gst: Number(taxes.gst.toFixed(2)),
+      tax_qst: Number(taxes.qst.toFixed(2)),
+      total_with_tax: Number(taxes.total.toFixed(2)),
+      customer_name: name,
+      customer_email: email,
+      customer_phone: phone || null,
+      passengers: Number(val("c_passengers") || 0) || null,
+      luggage: Number(val("c_luggage") || 0) || null,
+      notes: val("c_notes") || null
+    };
+
+    const checkoutBooking = {
+      booking_id: null,
+      name: name,
+      email: email,
+      phone: phone,
+      currency: currency,
+      date: state.date,
+      time: state.time,
+      pickup: state.pickup,
+      dropoff: (state.mode === "hourly") ? "Montreal Metropolitan Airport area" : state.dropoff,
+      triptype: (state.mode === "hourly") ? "hourly" : (state.transfer === "airport" ? "airport" : "point"),
+      vehicle: chosen.name,
+      vehicle_id: chosen.id,
+      hours: String(hoursNum),
+      roundtrip: "no",
+      notes: val("c_notes"),
+      estimate_text: (state.mode === "hourly")
+        ? `Total with tax ${formatMoney(taxes.total, currency)} for ${hoursNum} hour${hoursNum>1?"s":""}`
+        : `${formatMoney(taxes.total, currency)} incl. tax (${chosen.note})`,
+      subtotal: Number(taxes.subtotal.toFixed(2)),
+      tax_gst: Number(taxes.gst.toFixed(2)),
+      tax_qst: Number(taxes.qst.toFixed(2)),
+      estimate_total: Number(taxes.total.toFixed(2)),
+      estimate_total_cad: Number(taxes.total.toFixed(2)),
+      pay_option: "full",
+      pay_now: Number(taxes.total.toFixed(2)),
+      pay_now_cad: Number(taxes.total.toFixed(2))
+    };
 
     const summaryLines = [
       "New booking request",
@@ -3130,53 +3187,43 @@ function goToCheckoutOverlay(){
     ];
 
     try{
-      statusEl.textContent = "Opening booking request…";
-
-      const payload = {
-        mode: (state.mode === "hourly") ? "hourly" : "one_way",
-        pickup_text: state.pickup || "",
-        dropoff_text: (state.mode === "hourly") ? null : (state.dropoff || ""),
-        pickup_datetime: state.date && state.time ? new Date(`${state.date}T${state.time}:00`).toISOString() : null,
-        hours: (state.mode === "hourly") ? hoursNum : null,
-        currency: currency,
-        vehicle_key: chosen.id,
-        price_estimate: Number(chosen.total) || 0,
-        tax_gst: Number(taxes.gst.toFixed(2)),
-        tax_qst: Number(taxes.qst.toFixed(2)),
-        total_with_tax: Number(taxes.total.toFixed(2)),
-        customer_name: name,
-        customer_email: email,
-        customer_phone: phone || null,
-        passengers: Number(val("c_passengers") || 0) || null,
-        luggage: Number(val("c_luggage") || 0) || null,
-        notes: val("c_notes") || null
-      };
+      statusEl.textContent = "Saving your booking…";
 
       const saveRes = await fetch("/api/bookings", {
         method: "POST",
         headers: { "Content-Type":"application/json" },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(dbBooking)
+      });
+      const saveData = await saveRes.json().catch(()=> ({}));
+      if (!saveRes.ok || !saveData?.ok) throw new Error(saveData?.error || "Unable to save booking.");
+      checkoutBooking.booking_id = saveData.id || saveData.booking_id || null;
+
+      statusEl.textContent = "Starting secure checkout…";
+      const res = await fetch("/api/create-checkout-session", {
+        method: "POST",
+        headers: { "Content-Type":"application/json" },
+        body: JSON.stringify(checkoutBooking)
       });
 
-      const saveData = await saveRes.json().catch(()=> ({}));
-      if (saveRes.ok && saveData?.ok){
-        statusEl.textContent = "Booking saved successfully. We will contact you shortly.";
-        alert("Booking saved successfully. We will contact you shortly.");
+      const data = await res.json().catch(()=> ({}));
+      if (!res.ok) {
+        statusEl.textContent = `Booking saved${checkoutBooking.booking_id ? ` (ID: ${checkoutBooking.booking_id})` : ""}. Payment setup is pending.`;
+        alert(`Booking saved${checkoutBooking.booking_id ? `! Your booking ID is ${checkoutBooking.booking_id}.` : "."} We'll contact you to confirm and take payment.`);
         return;
       }
+      if (!data?.url) throw new Error("Missing checkout URL from server.");
+      window.location.href = data.url;
 
-      throw new Error(saveData?.error || "Booking API unavailable");
     }catch(err){
-      console.warn("Booking API unavailable, using WhatsApp/email fallback.", err);
+      console.error(err);
 
-      const message = encodeURIComponent(summaryLines.join("\n"));
+      const message = encodeURIComponent(summaryLines.join("\\n"));
       const waUrl = `https://wa.me/14383203733?text=${message}`;
       const mailSubject = encodeURIComponent("Booking Request - Montreal Metropolitan Airport Limo Services");
-      const mailBody = encodeURIComponent(summaryLines.join("\n"));
+      const mailBody = encodeURIComponent(summaryLines.join("\\n"));
 
-      statusEl.textContent = "Direct booking form is not connected yet. Opening WhatsApp so you can send the request now.";
+      statusEl.textContent = "Checkout error: " + (err.message || "Unknown error");
       window.open(waUrl, "_blank");
-
       setTimeout(() => {
         window.location.href = `mailto:info@montrealmetropolitanairportlimoservices.com?subject=${mailSubject}&body=${mailBody}`;
       }, 600);
@@ -3976,9 +4023,9 @@ function getQcCorridorBounds(){
       hero_title: "Private chauffeur service for Montreal Metropolitan Airport",
       hero_sub: "Airport transfers, executive travel, hourly bookings, corporate rides and special events.",
 
-      badge_247: "24/7 booking",
-      badge_pro: "Professional chauffeurs",
-      badge_premium: "Premium vehicles",
+      badge_247: "24/7 dispatch",
+      badge_pro: "Licensed chauffeurs",
+      badge_premium: "Executive fleet",
       badge_cities: "Montreal Metropolitan Airport • Montréal • Laval",
 
       tab_oneway: "One way",
@@ -4048,7 +4095,7 @@ function getQcCorridorBounds(){
       contact_sendmsg: "Send us a message",
       contact_sendbtn: "Send Message",
       services_page_title: "Services",
-      services_page_sub: "Services de chauffeur de luxe à Montréal et dans le secteur de Montreal Metropolitan Airport. Trajets point-à-point, à l’heure et sur mesure.",
+      services_page_sub: "Luxury chauffeur services in Montréal and the Montreal Metropolitan Airport area. Point-to-point, hourly, and custom trips.",
       services_categories: "Services populaires",
       services_routes: "Trajets interurbains & itinéraires populaires",
       svc_airport: "Transport aéroportuaire",
